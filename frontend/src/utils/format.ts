@@ -46,11 +46,44 @@ export function fileIcon(ext: string, mime: string): string {
   return '📁'
 }
 
-const DANGEROUS_ATTR = /\s(on\w+|style)\s*=/gi
+// Whitelist of HTML event-handler attribute names. Used as a fallback pass to
+// catch attributes that the broader regex misses (e.g. when `on` is glued
+// directly to an alphanumeric attribute value like `<img src=xonerror=...>`).
+// Using a whitelist (rather than the catch-all `on\w+`) avoids stripping
+// legitimate text like "one=1" / "only=the" / "longitude=42" which happen to
+// start with "on".
+const EVENT_ATTRS = [
+  'onload', 'onerror', 'onclick', 'ondblclick', 'onmousedown', 'onmouseup',
+  'onmouseover', 'onmousemove', 'onmouseout', 'onmouseenter', 'onmouseleave',
+  'onkeydown', 'onkeyup', 'onkeypress', 'onfocus', 'onblur', 'onchange',
+  'oninput', 'onsubmit', 'onreset', 'onselect', 'onabort', 'onresize',
+  'onscroll', 'onunload', 'onbeforeunload', 'oncopy', 'oncut', 'onpaste',
+  'ondrag', 'ondragstart', 'ondragend', 'ondragover', 'ondragleave',
+  'ondrop', 'ontouchstart', 'ontouchend', 'ontouchmove', 'onpointerdown',
+  'onpointerup', 'onpointermove', 'onwheel', 'oncontextmenu', 'onstorage',
+  'onmessage', 'onpopstate', 'onhashchange', 'onanimationstart',
+  'onanimationend', 'onanimationiteration', 'ontransitionend',
+]
+const EVENT_ATTR_RE = new RegExp(
+  `(?:${EVENT_ATTRS.join('|')})\\s*=`,
+  'gi',
+)
+// Anchor must be a character that can plausibly start an HTML attribute inside
+// a tag: whitespace, attribute delimiter, or another attribute boundary. We
+// intentionally do NOT include `>` because `>` closes a tag and content after
+// it is plain text (so `<p>one=1 two=2</p>` is not an attribute context).
+// This catches `<tag onerror=...>` (space), `<tag/onerror=...>` (slash — the
+// previous sanitizer missed this), `<tag a=b/onerror=...>`, etc.
+const DANGEROUS_ATTR = /[\s/"'=](?:on\w+|style)\s*=/gi
 export function sanitizeHighlightHtml(html: string): string {
   if (!html) return ''
   let out = html
+  // First pass: catch the common "<tag attr onerror=...>" form.
   out = out.replace(DANGEROUS_ATTR, ' data-removed=')
+  // Second pass: catch event-handler attributes that survived because they
+  // appear right after a tag-closing `>` or alphanumeric boundary. The
+  // whitelist is exact so we don't false-positive on words like "one=".
+  out = out.replace(EVENT_ATTR_RE, 'data-removed=')
   out = out.replace(/javascript\s*:/gi, 'data-invalid:')
   return out
 }

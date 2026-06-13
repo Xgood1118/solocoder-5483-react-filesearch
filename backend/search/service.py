@@ -204,17 +204,36 @@ def _rescore(hit_score: float, hit: Dict) -> float:
     return hit_score * recency_boost
 
 
-def _encode_cursor(last_score: float, last_file_id: str) -> str:
-    raw = f"{last_score:.9f}|{last_file_id}"
+def _encode_cursor(start_idx: int, sig: str) -> str:
+    """Cursor encodes the next-page start index and a signature for staleness checks.
+
+    The signature is a checksum over the result ordering up to ``start_idx`` so that
+    if the underlying result set changed (e.g. the index was rebuilt between calls)
+    we can refuse the cursor and force a fresh first-page request.
+    """
+    raw = f"{start_idx}|{sig}"
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _result_signature(rescored: List[tuple]) -> str:
+    """Stable short signature: SHA1 over (file_id, score-rounded-6dp) of all items."""
+    import hashlib
+    h = hashlib.sha1()
+    for sc, d, _ in rescored:
+        fid = d.get("file_id", "")
+        h.update(fid.encode("utf-8"))
+        h.update(b"|")
+        h.update(f"{sc:.6f}".encode("utf-8"))
+        h.update(b";")
+    return h.hexdigest()[:16]
 
 
 def _decode_cursor(cursor: str) -> Optional[Dict]:
     try:
         pad = "=" * (-len(cursor) % 4)
         raw = base64.urlsafe_b64decode(cursor + pad).decode("utf-8")
-        score_str, fid = raw.split("|", 1)
-        return {"score": float(score_str), "file_id": fid}
+        idx_str, sig = raw.split("|", 1)
+        return {"start_idx": int(idx_str), "sig": sig}
     except Exception:
         return None
 
@@ -255,17 +274,14 @@ def search(opts: SearchOptions) -> Dict[str, Any]:
         rescored.sort(key=lambda x: x[0], reverse=True)
 
         start_idx = 0
+        cursor_invalid = False
         if opts.cursor:
             cur = _decode_cursor(opts.cursor)
-            if cur:
-                for i, (sc, d, _) in enumerate(rescored):
-                    if sc < cur["score"] - 1e-9 or (
-                        abs(sc - cur["score"]) < 1e-9 and d.get("file_id", "") > cur["file_id"]
-                    ):
-                        start_idx = i
-                        break
-                else:
-                    start_idx = len(rescored)
+            sig_now = _result_signature(rescored)
+            if cur and cur.get("sig") == sig_now and 0 <= cur["start_idx"] <= len(rescored):
+                start_idx = cur["start_idx"]
+            else:
+                cursor_invalid = True
 
         end_idx = min(len(rescored), start_idx + opts.page_size)
         page_items = rescored[start_idx:end_idx]
@@ -300,8 +316,8 @@ def search(opts: SearchOptions) -> Dict[str, Any]:
 
         next_cursor = None
         if end_idx < len(rescored):
-            last_score, last_doc, _ = rescored[end_idx - 1]
-            next_cursor = _encode_cursor(last_score, last_doc.get("file_id", ""))
+            sig_now = _result_signature(rescored)
+            next_cursor = _encode_cursor(end_idx, sig_now)
 
     return {
         "results": out_results,
@@ -309,6 +325,7 @@ def search(opts: SearchOptions) -> Dict[str, Any]:
         "parsed": _parsed_info(pq),
         "total_returned": len(out_results),
         "total_found_cap": _MAX_HITS,
+        "cursor_invalid": cursor_invalid,
     }
 
 

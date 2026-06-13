@@ -150,18 +150,27 @@ def parse_query(raw: str) -> ParsedQuery:
         tokens.append(tok)
         i = j
 
+    expecting_not = False
     for tok in tokens:
         upper = tok.upper()
         if upper == "AND":
+            expecting_not = False
             continue
         if upper == "OR":
             pq.clauses.append([])
             pq.clause_field_filters.append([])
+            expecting_not = False
             continue
         if upper == "NOT":
+            expecting_not = True
             continue
         if tok.startswith("-") and len(tok) > 1:
             pq.not_terms.extend(_tokenize_query(tok[1:]))
+            expecting_not = False
+            continue
+        if expecting_not:
+            pq.not_terms.extend(_tokenize_query(tok))
+            expecting_not = False
             continue
 
         m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$", tok)
