@@ -65,7 +65,13 @@ class IndexManager:
     def get_stats(self) -> Dict:
         with self._lock:
             stats = self._stats
-            doc_count = self._index.doc_count() if self._index else 0
+            doc_count = 0
+            if self._index:
+                try:
+                    with self._index.reader() as r:
+                        doc_count = r.doc_count() - r.deleted_count()
+                except Exception:
+                    doc_count = self._index.doc_count()
             return {
                 "total_files_scanned": stats.total_files,
                 "indexed_count": doc_count,
@@ -95,14 +101,15 @@ class IndexManager:
                 continue
         return result
 
-    def _existing_doc_mtimes(self) -> Dict[str, float]:
-        result: Dict[str, float] = {}
+    def _existing_doc_mtimes(self) -> Dict[str, Tuple[float, str]]:
+        result: Dict[str, Tuple[float, str]] = {}
         with self._index.searcher() as s:
             for doc in s.all_stored_fields():
                 p = doc.get("path")
                 mt = doc.get("mtime", 0.0)
+                fid = doc.get("file_id", "")
                 if p:
-                    result[p] = float(mt)
+                    result[p] = (float(mt), fid)
         return result
 
     def _add_failure(self, path: str, error: str):
@@ -232,14 +239,20 @@ class IndexManager:
         existing_paths: Set[str] = set(existing.keys())
         current_paths: Set[str] = set(snapshot.keys())
 
-        to_delete = existing_paths - current_paths
+        to_delete_paths = existing_paths - current_paths
+        to_delete_file_ids: List[str] = []
+        for p in to_delete_paths:
+            _mt, fid = existing[p]
+            if fid:
+                to_delete_file_ids.append(fid)
         to_update: List[str] = []
         for p in current_paths:
             if p not in existing:
                 to_update.append(p)
             else:
                 mtime_new, _ = snapshot[p]
-                if mtime_new > existing[p] + 1e-3:
+                mtime_old, _fid = existing[p]
+                if mtime_new > mtime_old + 1e-3:
                     to_update.append(p)
 
         to_update_sorted = sorted(to_update, key=lambda p: snapshot[p][0], reverse=True)
@@ -248,11 +261,12 @@ class IndexManager:
 
         with self._lock:
             self._stats.total_files = len(snapshot)
-            self._stats.skipped = len(current_paths) - len(to_update) - len(to_delete & current_paths)
+            self._stats.skipped = len(current_paths) - len(to_update)
 
         writer = AsyncWriter(self._index, delay=0.25, writerargs={"limitmb": 256})
         added = 0
         updated = 0
+        deleted = 0
         try:
             for path_str in to_update_sorted:
                 p = Path(path_str)
@@ -269,14 +283,20 @@ class IndexManager:
                     logger.exception(f"index error for {p}: {e}")
                     self._add_failure(path_str, f"index: {e}")
 
-            for path_str in to_delete:
+            for fid in to_delete_file_ids:
                 try:
-                    writer.delete_by_term("path", path_str)
-                    updated += 1
+                    writer.delete_by_term("file_id", fid)
+                    deleted += 1
                 except Exception as e:
-                    logger.warning(f"delete from index failed {path_str}: {e}")
+                    logger.warning(f"delete from index failed file_id={fid}: {e}")
 
             writer.commit()
+            try:
+                if deleted > 0 or (added + updated) % 2000 == 0:
+                    self._index.optimize()
+                    logger.info(f"index optimized: deleted_cleaned={deleted}")
+            except Exception as e:
+                logger.warning(f"index optimize skipped: {e}")
         except Exception:
             try:
                 writer.cancel()
@@ -286,10 +306,10 @@ class IndexManager:
 
         with self._lock:
             self._stats.indexed = added
-            self._stats.deleted += updated
+            self._stats.deleted += deleted
 
-        logger.info(f"incremental done: added={added} updated={updated} deleted={updated} failed={self._stats.failed}")
-        return {"ok": True, "added": added, "updated": updated, "deleted": updated, "failed": self._stats.failed, "scanned": len(snapshot)}
+        logger.info(f"incremental done: added={added} updated={updated} deleted={deleted} failed={self._stats.failed}")
+        return {"ok": True, "added": added, "updated": updated, "deleted": deleted, "failed": self._stats.failed, "scanned": len(snapshot)}
 
     def _on_ocr_done(self, file_path: str, page: Optional[int], text: str):
         if not text:

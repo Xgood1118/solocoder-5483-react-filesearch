@@ -1,0 +1,1 @@
+search 接口还有一些问题。cursor 分页第二页会重复第一页最后一个结果——比如 page_size=3 时第一页返 A/B/C 带 cursor,第二页从 C 开头又把 C 返一次,前端加载更多按钮点一次就重复一条数据;前端搜结果把服务器绝对路径整个露在 UI 上(目录列里直接是 C:\Users\... 全路径),部署到 NAS 后会泄漏真实文件结构;另外 NOT 关键字搜文件+NOT 技术居然把 NOT 当成普通词忽略,等于 NOT 语法直接不生效;前端 sanitizeHighlightHtml 正则在 onerror 紧贴 /> 这种边界上漏检,虽然后端 mark 标签通常不会触发,但搜索结果如果含 onerror= 紧贴字符就会穿过 sanitize 直接进 DOM。检查修复一下。

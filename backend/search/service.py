@@ -182,9 +182,9 @@ def _build_whoosh_query(pq, schema, opts: SearchOptions) -> "wq.Query":
     if opts.mime:
         all_clauses.append(Prefix("mime_type", opts.mime))
     if opts.from_date is not None:
-        all_clauses.append(NumericRange("mtime", start=float(opts.from_date), end=None, startincl=True))
+        all_clauses.append(NumericRange("mtime", start=float(opts.from_date), end=None))
     if opts.to_date is not None:
-        all_clauses.append(NumericRange("mtime", start=None, end=float(opts.to_date), endincl=True))
+        all_clauses.append(NumericRange("mtime", start=None, end=float(opts.to_date)))
 
     if not all_clauses:
         return Every()
